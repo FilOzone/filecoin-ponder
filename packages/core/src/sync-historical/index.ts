@@ -1,4 +1,3 @@
-import { getLogsRetryHelper } from "@ponder/utils";
 import {
   type Address,
   type Hash,
@@ -32,6 +31,7 @@ import {
   eth_getBlockReceipts,
   eth_getLogs,
   eth_getTransactionReceipt,
+  isBlockNotFoundError,
   validateLogsAndBlock,
   validateReceiptsAndBlock,
   validateTracesAndBlock,
@@ -57,6 +57,7 @@ import type {
 } from "@/runtime/index.js";
 import type { SyncStore } from "@/sync-store/index.js";
 import { dedupe } from "@/utils/dedupe.js";
+import { getLogsRetryHelper } from "@/utils/getLogsRetryHelper.js";
 import {
   getChunks,
   type Interval,
@@ -699,6 +700,26 @@ export const createHistoricalSync = (
       let closestToTipBlock: SyncBlock | undefined;
 
       const syncBlockData = async (blockNumber: number) => {
+        try {
+          return await syncBlockDataInner(blockNumber);
+        } catch (error) {
+          // Some chains (e.g. Filecoin) have "null rounds" where no block is
+          // produced at a given height. eth_getBlockByNumber returns null or
+          // an RPC error. Skip these blocks silently.
+          if (isBlockNotFoundError(error)) {
+            args.common.logger.trace({
+              msg: "Block not found (null round), skipping",
+              chain: args.chain.name,
+              chain_id: args.chain.id,
+              number: blockNumber,
+            });
+            return;
+          }
+          throw error;
+        }
+      };
+
+      const syncBlockDataInner = async (blockNumber: number) => {
         let block: SyncBlock | undefined;
 
         const requiredTransactions = new Set<Hash>();
@@ -766,6 +787,7 @@ export const createHistoricalSync = (
                 method: "eth_getBlockByNumber",
                 params: [toHex(blockNumber), true],
               },
+              args.chain.id,
             );
           }
         }

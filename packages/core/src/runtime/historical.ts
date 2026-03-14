@@ -1,4 +1,4 @@
-import { hexToNumber, numberToHex } from "viem";
+import { hexToNumber } from "viem";
 import type { Database } from "@/database/index.js";
 import type { Common } from "@/internal/common.js";
 import { ShutdownError } from "@/internal/errors.js";
@@ -11,7 +11,7 @@ import type {
   RawEvent,
   SyncBlock,
 } from "@/internal/types.js";
-import { eth_getBlockByNumber } from "@/rpc/actions.js";
+import { eth_getBlockAtOrBelow, eth_getBlockByNumber } from "@/rpc/actions.js";
 import type { Rpc } from "@/rpc/index.js";
 import { buildEvents, decodeEvents } from "@/runtime/events.js";
 import { createHistoricalSync } from "@/sync-historical/index.js";
@@ -324,17 +324,12 @@ export async function* getHistoricalEventsOmnichain(params: {
 
         return eth_getBlockByNumber(rpc, ["latest", false], context)
           .then((latest) =>
-            eth_getBlockByNumber(
+            eth_getBlockAtOrBelow(
               rpc,
-              [
-                numberToHex(
-                  Math.max(
-                    hexToNumber(latest.number) - chain.finalityBlockCount,
-                    0,
-                  ),
-                ),
-                false,
-              ],
+              Math.max(
+                hexToNumber(latest.number) - chain.finalityBlockCount,
+                0,
+              ),
               context,
             ),
           )
@@ -581,17 +576,12 @@ export async function* getHistoricalEventsMultichain(params: {
 
         return eth_getBlockByNumber(rpc, ["latest", false], context)
           .then((latest) =>
-            eth_getBlockByNumber(
+            eth_getBlockAtOrBelow(
               rpc,
-              [
-                numberToHex(
-                  Math.max(
-                    hexToNumber(latest.number) - chain.finalityBlockCount,
-                    0,
-                  ),
-                ),
-                false,
-              ],
+              Math.max(
+                hexToNumber(latest.number) - chain.finalityBlockCount,
+                0,
+              ),
               context,
             ),
           )
@@ -800,17 +790,12 @@ export async function* getHistoricalEventsIsolated(params: {
       ["latest", false],
       context,
     ).then((latest) =>
-      eth_getBlockByNumber(
+      eth_getBlockAtOrBelow(
         rpc,
-        [
-          numberToHex(
-            Math.max(
-              hexToNumber(latest.number) - params.chain.finalityBlockCount,
-              0,
-            ),
-          ),
-          false,
-        ],
+        Math.max(
+          hexToNumber(latest.number) - params.chain.finalityBlockCount,
+          0,
+        ),
         context,
       ),
     );

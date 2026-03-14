@@ -33,6 +33,7 @@ import {
   eth_getBlockReceipts,
   eth_getLogs,
   eth_getTransactionReceipt,
+  isBlockNotFoundError,
   validateLogsAndBlock,
   validateReceiptsAndBlock,
   validateTracesAndBlock,
@@ -344,6 +345,7 @@ export const createRealtimeSync = (
               method: "eth_getBlockByHash",
               params: [block.hash, true],
             },
+        args.chain.id,
       );
 
       // Note: Exact `logsBloom` validations were considered too strict to add to `validateLogsAndBlock`.
@@ -880,6 +882,10 @@ export const createRealtimeSync = (
    * Traverse the remote chain until we find a block that is
    * compatible with our local chain.
    *
+   * The common ancestor is matched by hash, not height. On chains with null
+   * rounds (Filecoin), a reorg can change which heights hold a block, so the
+   * local and remote chains needn't have blocks at the same heights.
+   *
    * @param block Block that caused reorg to be detected.
    * Must be at most 1 block ahead of the local chain.
    */
@@ -899,32 +905,43 @@ export const createRealtimeSync = (
       hash: block.hash,
     });
 
-    // Record blocks that have been removed from the local chain.
-    const reorgedBlocks = unfinalizedBlocks.filter(
-      (lb) => hexToNumber(lb.number) >= hexToNumber(block.number),
-    );
-
-    // Prune the local chain of blocks that have been reorged out
-    unfinalizedBlocks = unfinalizedBlocks.filter(
-      (lb) => hexToNumber(lb.number) < hexToNumber(block.number),
-    );
-
     // Block we are attempting to fit into the local chain.
     let remoteBlock: LightBlock = block;
+    let commonAncestor: LightBlock | undefined;
 
     while (true) {
-      const parentBlock = getLatestUnfinalizedBlock();
+      const parentHash = remoteBlock.parentHash;
+      commonAncestor =
+        finalizedBlock.hash === parentHash
+          ? finalizedBlock
+          : unfinalizedBlocks.find((lb) => lb.hash === parentHash);
+      if (commonAncestor !== undefined) {
+        if (
+          hexToNumber(commonAncestor.number) >= hexToNumber(remoteBlock.number)
+        ) {
+          throw new Error(
+            `Received '${args.chain.name}' block ${hexToNumber(remoteBlock.number)} whose parent is local block ${hexToNumber(commonAncestor.number)}`,
+          );
+        }
+        break;
+      }
 
-      if (parentBlock.hash === remoteBlock.parentHash) break;
+      const parentBlock: LightBlock = await eth_getBlockByHash(
+        args.rpc,
+        [parentHash, false],
+        context,
+      );
 
-      if (unfinalizedBlocks.length === 0) {
-        // No compatible block was found in the local chain, must be a deep reorg.
+      if (hexToNumber(parentBlock.number) >= hexToNumber(remoteBlock.number)) {
+        throw new Error(
+          `Received '${args.chain.name}' block ${hexToNumber(parentBlock.number)} as the parent of block ${hexToNumber(remoteBlock.number)}`,
+        );
+      }
 
-        // Note: reorgedBlocks aren't removed from `unfinalizedBlocks` because we are "bailing"
-        // from this attempt to reconcile the reorg, we need to reset the local chain state back
-        // to what it was before we started.
-        unfinalizedBlocks = reorgedBlocks;
-
+      // The remote chain reached the finalized height without joining the local chain.
+      if (
+        hexToNumber(parentBlock.number) <= hexToNumber(finalizedBlock.number)
+      ) {
         args.common.logger.warn({
           msg: "Encountered unrecoverable reorg",
           chain: args.chain.name,
@@ -936,18 +953,22 @@ export const createRealtimeSync = (
         throw new Error(
           `Encountered unrecoverable '${args.chain.name}' reorg beyond finalized block ${hexToNumber(finalizedBlock.number)}`,
         );
-      } else {
-        remoteBlock = await eth_getBlockByHash(
-          args.rpc,
-          [remoteBlock.parentHash, false],
-          context,
-        );
-        // Add tip to `reorgedBlocks`
-        reorgedBlocks.unshift(unfinalizedBlocks.pop()!);
       }
+
+      remoteBlock = parentBlock;
     }
 
-    const commonAncestor = getLatestUnfinalizedBlock();
+    const ancestorNumber = hexToNumber(commonAncestor.number);
+
+    // Record blocks that have been removed from the local chain.
+    const reorgedBlocks = unfinalizedBlocks.filter(
+      (lb) => hexToNumber(lb.number) > ancestorNumber,
+    );
+
+    // Prune the local chain of blocks that have been reorged out
+    unfinalizedBlocks = unfinalizedBlocks.filter(
+      (lb) => hexToNumber(lb.number) <= ancestorNumber,
+    );
 
     args.common.logger.debug({
       msg: "Reconciled reorg in local chain",
@@ -1027,7 +1048,13 @@ export const createRealtimeSync = (
     }
 
     // Blocks are missing. They should be fetched and enqueued.
-    if (hexToNumber(latestBlock.number) + 1 < hexToNumber(block.number)) {
+    // On chains with null rounds (e.g. Filecoin), some block heights have no
+    // block. If the incoming block's parentHash matches our local tip, the gap
+    // consists entirely of null rounds and we can skip straight to ingestion.
+    if (
+      hexToNumber(latestBlock.number) + 1 < hexToNumber(block.number) &&
+      block.parentHash !== latestBlock.hash
+    ) {
       args.common.logger.trace({
         msg: "Missing blocks from local chain",
         chain: args.chain.name,
@@ -1047,15 +1074,33 @@ export const createRealtimeSync = (
         ),
       );
 
-      const pendingBlocks = await Promise.all(
-        missingBlockRange.map((blockNumber) =>
-          eth_getBlockByNumber(args.rpc, [numberToHex(blockNumber), true], {
-            logger: args.common.logger.child({
-              action: "fetch_missing_blocks",
-            }),
-          }).then((block) => fetchBlockEventData(block)),
-        ),
-      );
+      // Some chains (e.g. Filecoin) have "null rounds" where no block is
+      // produced at a given height. eth_getBlockByNumber returns null for
+      // these heights. Filter them out rather than treating as an error.
+      const pendingBlocks = (
+        await Promise.all(
+          missingBlockRange.map((blockNumber) =>
+            eth_getBlockByNumber(args.rpc, [numberToHex(blockNumber), true], {
+              logger: args.common.logger.child({
+                action: "fetch_missing_blocks",
+              }),
+            })
+              .then((block) => fetchBlockEventData(block))
+              .catch((error) => {
+                if (isBlockNotFoundError(error)) {
+                  args.common.logger.trace({
+                    msg: "Block not found (null round), skipping",
+                    chain: args.chain.name,
+                    chain_id: args.chain.id,
+                    number: blockNumber,
+                  });
+                  return null;
+                }
+                throw error;
+              }),
+          ),
+        )
+      ).filter((b): b is BlockWithEventData => b !== null);
 
       args.common.logger.debug({
         msg: "Fetched missing blocks",
@@ -1087,6 +1132,15 @@ export const createRealtimeSync = (
         });
 
         blockCallback?.(false);
+      } else if (pendingBlocks.length === 0) {
+        // The entire missing range was null rounds, so no real block bridges
+        // the parentHash gap that put us in this branch: the local tip was
+        // reorged out. Recursing would re-enter with the same stale tip and
+        // loop forever, so reconcile the reorg instead.
+        const reorgEvent = await reconcileReorg(block);
+
+        blockCallback?.(false);
+        yield reorgEvent;
       } else {
         yield* reconcileBlock(blockWithEventData, blockCallback);
       }
@@ -1160,13 +1214,21 @@ export const createRealtimeSync = (
     const blockMovesFinality =
       hexToNumber(block.number) >=
       hexToNumber(finalizedBlock.number) + 2 * args.chain.finalityBlockCount;
+    // The highest local block at or below the finality target. On chains with
+    // null rounds (Filecoin), the target height itself can hold no block.
+    let pendingFinalizedBlock: LightBlock | undefined;
     if (blockMovesFinality) {
-      const pendingFinalizedBlock = unfinalizedBlocks.find(
-        (lb) =>
-          hexToNumber(lb.number) ===
-          hexToNumber(block.number) - args.chain.finalityBlockCount,
-      )!;
+      const finalityTarget =
+        hexToNumber(block.number) - args.chain.finalityBlockCount;
+      for (let i = unfinalizedBlocks.length - 1; i >= 0; i--) {
+        if (hexToNumber(unfinalizedBlocks[i]!.number) <= finalityTarget) {
+          pendingFinalizedBlock = unfinalizedBlocks[i];
+          break;
+        }
+      }
+    }
 
+    if (pendingFinalizedBlock !== undefined) {
       args.common.logger.debug({
         msg: "Removed finalized blocks from local chain",
         chain: args.chain.name,

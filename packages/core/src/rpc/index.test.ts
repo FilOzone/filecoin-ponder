@@ -59,6 +59,37 @@ test("createRpc() retry BlockNotFoundError", async () => {
   expect(block).not.toBeNull();
 });
 
+test("createRpc() does not retry null round error (code 12)", async () => {
+  const chain = getChain();
+  const rpc = createRpc({
+    common: context.common,
+    chain,
+  });
+
+  // Every response is a null round, so any retry would show as a second call.
+  const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
+    async () =>
+      new Response(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          error: { code: 12, message: "requested epoch was a null round" },
+          id: 1,
+        }),
+      ),
+  );
+  // Earlier tests in this file spy on fetch too; under Bun their calls carry over.
+  fetchSpy.mockClear();
+
+  try {
+    await expect(
+      rpc.request({ method: "eth_getBlockByNumber", params: ["0x100", true] }),
+    ).rejects.toThrow();
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  } finally {
+    fetchSpy.mockRestore();
+  }
+});
+
 test("https://github.com/ponder-sh/ponder/pull/2143", async () => {
   const chain = getChain();
   const rpc = createRpc({

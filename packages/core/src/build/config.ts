@@ -7,7 +7,6 @@ import {
   type Hex,
   hexToNumber,
   type LogTopic,
-  numberToHex,
   toEventSelector,
   toFunctionSelector,
 } from "viem";
@@ -31,7 +30,7 @@ import type {
   TransactionFilter,
   TransferFilter,
 } from "@/internal/types.js";
-import { eth_getBlockByNumber } from "@/rpc/actions.js";
+import { eth_getBlockAtOrBelow, eth_getBlockByNumber } from "@/rpc/actions.js";
 import { createRpc, type Rpc } from "@/rpc/index.js";
 import {
   defaultBlockFilterInclude,
@@ -174,9 +173,9 @@ export async function buildIndexingFunctions({
       perChainLatestBlockNumber.set(chain.name, blockPromise);
 
       return blockPromise.then((latest) =>
-        eth_getBlockByNumber(
+        eth_getBlockAtOrBelow(
           rpc,
-          [numberToHex(Math.max(latest - chain.finalityBlockCount, 0)), false],
+          Math.max(latest - chain.finalityBlockCount, 0),
           { ...context, retryNullBlockRequest: true },
         ).then((block) => ({
           hash: block.hash,

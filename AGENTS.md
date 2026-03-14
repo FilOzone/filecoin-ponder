@@ -1,3 +1,35 @@
+# filecoin-ponder
+
+This repository is a fork of [Ponder](https://github.com/ponder-sh/ponder), patched to index Filecoin mainnet (chain 314) and calibnet (314159). It is upstream `main` plus one commit of Filecoin fixes, published to npm as `@filoz/ponder`; [foc-observer](https://github.com/FilOzone/foc-observer) consumes it as `"ponder": "npm:@filoz/ponder@<version>"`. Upstream declined the patches ([ponder-sh/ponder#2282](https://github.com/ponder-sh/ponder/pull/2282)). This section covers the fork. Upstream's guide follows, from `# AGENTS.md` down, and applies unchanged except where noted here.
+
+## How Filecoin differs
+
+- **Null rounds.** An epoch (30 seconds) can produce no block. Lotus answers `eth_getBlockByNumber` for one with RPC error code 12 (`requested epoch was a null round`), not `null`, and the answer never changes. A reorg can change which heights are null, so two versions of the chain needn't have blocks at the same heights.
+- **Saturated logs bloom.** The FVM sets every `logsBloom` bit, so bloom checks can't skip blocks and "non-zero bloom implies logs" is false.
+- **Gateway lookback.** A Lotus gateway serves limited history; old blocks can fail with a lookback error.
+- **`eth_getLogs` range limit.** Lotus rejects ranges wider than `MaxFilterHeightRange` (default 2880) in an error format `@ponder/utils` doesn't parse.
+
+## The patches
+
+Under `packages/core/src/`:
+
+- **Null rounds.** `isNullRoundError()` (`rpc/actions.ts`), never retried by `shouldRetry()` (`rpc/index.ts`); historical and realtime sync skip null heights. `reconcileReorg()` (`sync-realtime/index.ts`) matches the common ancestor by the remote parent's hash, never by position, and realtime finality takes the highest local block at or below its target. `eth_getBlockAtOrBelow()` fetches the finalized block at startup (`build/config.ts`) and backfill cutover (`runtime/historical.ts`), stepping down past null rounds.
+- **Bloom.** `validateLogsAndBlock()` skips its bloom check when `isFilecoinChain(chainId)` (`utils/finality.ts`, which also sets 900-block finality for both chains).
+- **Lookback.** `fetchStartBlock()` (`runtime/index.ts`) substitutes a placeholder block when the start block is beyond the gateway's lookback.
+- **`eth_getLogs` ranges.** `utils/getLogsRetryHelper.ts` chunks requests to the range Lotus's error states.
+- **RPC timeouts.** 20 seconds, not 10 (`rpc/index.ts`, `rpc/http.ts`).
+
+## Working on the fork
+
+- **Keep the delta small.** Every rebase replays the fork commit onto new upstream code, so change as few upstream lines as a fix needs, and put Filecoin tests in new files (`sync-realtime/null-rounds.test.ts`).
+- **Assume nothing about heights.** Code that fetches a block by number must handle a null round; code that walks or compares chains by position breaks when null rounds move. Match blocks by hash, and take the nearest block at or below a height.
+- **Leave other chains alone.** Patches are no-ops where every height holds a block, or gated on `isFilecoinChain()`.
+- **Upstream's tests can't produce null rounds** (Anvil), so Filecoin cases use a stub RPC. A stub must return a fresh object per call, because Ponder mutates the blocks it receives.
+- **Not in the fork:** changesets, `packages/core/CHANGELOG.md` edits and changes to `packages/utils`. The changelog is upstream's, and `@ponder/utils` comes from upstream's npm releases. `packages/core` publishes as `@filoz/ponder`, not `ponder`; `pnpm --filter ponder` still selects it, as pnpm allows omitting an unambiguous scope.
+- **Releases and rebases:** see `README.md`. After a rebase, recheck the patches against upstream rewrites of realtime reorg handling, finality, the finalized-block fetch and `eth_getLogs` request merging.
+- Write code comments year-zero, describing the code as it is; history belongs in the commit message. Report vulnerabilities privately as the [FilOzone security policy](https://github.com/FilOzone/.github/blob/main/SECURITY.md) describes.
+- `CLAUDE.md` contains only `@AGENTS.md`, because Claude Code skips `AGENTS.md` when a `CLAUDE.md` exists. Keep content here, and keep this section accurate with the code.
+
 # AGENTS.md
 
 ## Repository Shape
