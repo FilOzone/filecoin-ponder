@@ -1,59 +1,54 @@
 name: Release
 
+# Publishes @filoz/ponder to npm using OIDC (Trusted Publishing).
+# No NPM_TOKEN secret needed; npm validates the GitHub OIDC token instead.
+# Set up trusted publishing for the package on npmjs.com first:
+#   npmjs.com -> @filoz/ponder -> Settings -> Trusted Publishers
+#   Repository: FilOzone/filecoin-ponder
+#   Workflow: .github/workflows/release.yml
+#
+# Triggers:
+#   - workflow_dispatch: manual run, optionally publish under an npm dist-tag
+#     (e.g. "next") to keep "latest" untouched. Useful for smoke testing.
+#   - push of a v* tag (e.g. v0.18.9-filecoin.1): publishes whatever version is in
+#     packages/core/package.json under the "latest" dist-tag.
+#
+# Workflow expects packages/core/package.json's "version" field to be upstream
+# ponder's release plus a -filecoin.N suffix counting fork releases on it.
+#
+# packages/core keeps the name "ponder" in the repository, because the workspace's
+# examples, tests and benchmarks depend on "ponder@workspace:*". The publish step
+# renames it.
+
 on:
   workflow_dispatch:
+    inputs:
+      dist-tag:
+        description: 'npm dist-tag to publish under (default: latest)'
+        required: false
+        default: 'latest'
+  push:
+    tags:
+      - 'v*'
 
 jobs:
-  release:
-    if: github.ref == 'refs/heads/main'
-    name: Release
-    runs-on: ubuntu-24.04
-    environment: npm
-    permissions:
-      contents: write
-      id-token: write
-    steps:
-      - name: Clone repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Set up node
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: 24.22.1
-          registry-url: 'https://registry.npmjs.org'
-
-      - name: Set up pnpm
-        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
-        with:
-          cache: true
-
-      - name: Set up foundry
-        uses: foundry-rs/foundry-toolchain@dba66c27052e63476d886f22216e119ba7e615bf # v1.9.2
-        with:
-          version: "v1.8.6"
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Build
-        run: pnpm build
-
-      - name: Publish to npm
-        uses: changesets/action/publish@ae32849d5ba541f9ae29e40e22a623bc13562f51 # v2.1.2
-        with:
-          script: pnpm changeset publish
-
-  snapshot:
-    if: github.ref != 'refs/heads/main'
-    name: Release snapshot version
-    runs-on: ubuntu-24.04
-    environment: npm
+  publish:
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       id-token: write
     steps:
-      - name: Clone repository
+      - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Check tag matches package version
+        if: github.event_name == 'push'
+        run: |
+          version=$(node -p "require('./packages/core/package.json').version")
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "Tag $GITHUB_REF_NAME doesn't match packages/core/package.json version $version"
+            exit 1
+          fi
 
       - name: Set up node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -66,25 +61,23 @@ jobs:
         with:
           cache: true
 
-      - name: Set up foundry
-        uses: foundry-rs/foundry-toolchain@dba66c27052e63476d886f22216e119ba7e615bf # v1.9.2
-        with:
-          version: "v1.8.6"
-
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Version snapshot
+      - name: Build packages
+        run: pnpm --filter 'ponder...' build
+
+      - name: Determine dist-tag
+        id: tag
         run: |
-          snapshot=$(git branch --show-current | tr -cs '[:alnum:]-' '-' | tr '[:upper:]' '[:lower:]' | sed 's/-$//')
-          echo "SNAPSHOT=$snapshot" >> "$GITHUB_ENV"
-          pnpm changeset version --snapshot $snapshot
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "value=${{ inputs.dist-tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=latest" >> "$GITHUB_OUTPUT"
+          fi
 
-      # Build after versioning: `create-ponder` bundles its `package.json` version.
-      - name: Build
-        run: pnpm build
-
-      - name: Publish snapshot to npm
-        run: pnpm changeset publish --no-git-tag --tag "$SNAPSHOT"
+      - name: Publish @filoz/ponder
+        working-directory: packages/core
+        run: |
+          npm pkg set name=@filoz/ponder
+          pnpm publish --access public --provenance --no-git-checks --tag ${{ steps.tag.outputs.value }}

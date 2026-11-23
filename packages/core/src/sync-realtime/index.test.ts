@@ -1477,7 +1477,7 @@ test("handleReorg() removes child addresses with more than one parent", async ()
   expect(realtimeSync.unfinalizedBlocks).toHaveLength(0);
 });
 
-test("handleReorg() throws error for deep reorg", async () => {
+test("handleReorg() reconciles a block whose parent skips a height", async () => {
   const { common } = context;
   await setupDatabaseServices();
 
@@ -1511,10 +1511,9 @@ test("handleReorg() throws error for deep reorg", async () => {
   const blockData3 = await simulateBlock();
   await drainAsyncGenerator(realtimeSync.sync(blockData3.block));
 
-  const requestSpy = vi.spyOn(rpc, "request");
-  const warnSpy = vi.spyOn(common.logger, "warn");
-
-  await drainAsyncGenerator(
+  // Block 4's parent is block 2: height 3 is a null round on the remote chain,
+  // as Filecoin allows, so block 3 is reorged out and block 2 is the ancestor.
+  const syncResult = await drainAsyncGenerator(
     realtimeSync.sync({
       ...blockData3.block,
       number: "0x4",
@@ -1523,18 +1522,12 @@ test("handleReorg() throws error for deep reorg", async () => {
     }),
   );
 
-  // Note: Block filters do not require logs.
-  expect(
-    requestSpy.mock.calls.some(([request]) => request.method === "eth_getLogs"),
-  ).toBe(false);
-  expect(warnSpy).toHaveBeenCalledWith(
-    expect.objectContaining({
-      error: expect.objectContaining({
-        message: expect.stringContaining("Encountered unrecoverable"),
-      }),
-    }),
-  );
-
-  // block 4 is not added to `unfinalizedBlocks`
-  expect(realtimeSync.unfinalizedBlocks).toHaveLength(3);
+  expect(syncResult).toStrictEqual([
+    {
+      type: "reorg",
+      block: expect.objectContaining({ hash: blockData2.block.hash }),
+      reorgedBlocks: [expect.objectContaining({ hash: blockData3.block.hash })],
+    },
+  ]);
+  expect(realtimeSync.unfinalizedBlocks).toHaveLength(2);
 });

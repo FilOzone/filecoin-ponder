@@ -1,7 +1,4 @@
-import {
-  type GetLogsRetryHelperParameters,
-  getLogsRetryHelper,
-} from "@ponder/utils";
+import type { GetLogsRetryHelperParameters } from "@ponder/utils";
 import {
   BlockNotFoundError,
   type Hash,
@@ -28,9 +25,38 @@ import type {
 import type { RequestParameters, Rpc } from "@/rpc/index.js";
 import { zeroLogsBloom } from "@/sync-realtime/bloom.js";
 import { chunk } from "@/utils/chunk.js";
+import { getLogsRetryHelper } from "@/utils/getLogsRetryHelper.js";
 import { PG_BIGINT_MAX, PG_INTEGER_MAX } from "@/utils/pg.js";
 
 export const ADDRESS_CHUNK_SIZE = 50;
+
+/**
+ * Returns true if the error indicates a null round (an epoch with no block).
+ * Matches RPC error code 12 or a "null round" error message.
+ */
+export function isNullRoundError(error: unknown): boolean {
+  if (error && typeof error === "object") {
+    // Filecoin null rounds return RPC error code 12
+    if (
+      "cause" in error &&
+      error.cause &&
+      typeof error.cause === "object" &&
+      "code" in error.cause &&
+      error.cause.code === 12
+    ) {
+      return true;
+    }
+    // Check the error message as a fallback
+    if (
+      "message" in error &&
+      typeof error.message === "string" &&
+      error.message.includes("null round")
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
 
 /**
  * Helper function for "eth_getBlockByNumber" request.
@@ -65,6 +91,33 @@ export const eth_getBlockByNumber = <
         params,
       });
     });
+
+// Null rounds come in short runs; a longer run means the RPC is unhealthy.
+const MAX_NULL_ROUNDS = 1_000;
+
+/**
+ * The block at `blockNumber`, or the nearest block below it when that height is
+ * a null round (a Filecoin epoch without a block).
+ */
+export const eth_getBlockAtOrBelow = async (
+  rpc: Rpc,
+  blockNumber: number,
+  context?: Parameters<Rpc["request"]>[1],
+): Promise<LightBlock> => {
+  for (let n = blockNumber; ; n--) {
+    try {
+      return await eth_getBlockByNumber(rpc, [numberToHex(n), false], context);
+    } catch (error) {
+      if (
+        !isNullRoundError(error) ||
+        n === 0 ||
+        blockNumber - n >= MAX_NULL_ROUNDS
+      ) {
+        throw error;
+      }
+    }
+  }
+};
 
 /**
  * Helper function for "eth_getBlockByHash" request.

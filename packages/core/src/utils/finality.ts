@@ -1,9 +1,19 @@
-import { hexToNumber, numberToHex } from "viem";
+import { hexToNumber } from "viem";
 import type { Chain, LightBlock } from "@/internal/types.js";
-import { eth_getBlockByNumber } from "@/rpc/actions.js";
+import { eth_getBlockAtOrBelow, eth_getBlockByNumber } from "@/rpc/actions.js";
 import type { Rpc } from "@/rpc/index.js";
 
 export const DEFAULT_REORG_WINDOW = 180;
+
+/** Filecoin mainnet (314) and calibnet (314159). */
+export const isFilecoinChain = (chainId: number) =>
+  chainId === 314 || chainId === 314159;
+
+/**
+ * The maximum `reorgWindow`, 20 Filecoin epochs. Filecoin produces a block every
+ * 30 seconds, so the default window would span only 6.
+ */
+export const FILECOIN_REORG_WINDOW = 600;
 
 export const isAsyncExecutionChain = (chainId: number) =>
   chainId === 143 ||
@@ -52,11 +62,10 @@ export async function getFinalizedBlock({
   let blockNumber = Math.max(low, Math.min(estimatedBlockNumber, high));
 
   while (low <= high) {
-    const block = await eth_getBlockByNumber(
-      rpc,
-      [numberToHex(blockNumber), false],
-      { retryNullBlockRequest: true },
-    );
+    // A null round (Filecoin) at `blockNumber` yields the nearest block below it.
+    const block = await eth_getBlockAtOrBelow(rpc, blockNumber, {
+      retryNullBlockRequest: true,
+    });
 
     if (hexToNumber(block.timestamp) <= targetTimestamp) {
       finalizedBlock = block;

@@ -1,4 +1,3 @@
-import { getLogsRetryHelper } from "@ponder/utils";
 import {
   type Address,
   type Hash,
@@ -30,6 +29,7 @@ import {
   eth_getBlockByNumber,
   eth_getLogs,
   eth_getTransactionReceipts,
+  isNullRoundError,
   validateLogsAndBlock,
   validateReceiptsAndBlock,
   validateTracesAndBlock,
@@ -56,6 +56,7 @@ import type {
 } from "@/runtime/index.js";
 import type { SyncStore } from "@/sync-store/index.js";
 import { dedupe } from "@/utils/dedupe.js";
+import { getLogsRetryHelper } from "@/utils/getLogsRetryHelper.js";
 import {
   getChunks,
   type Interval,
@@ -487,6 +488,17 @@ export const createHistoricalSync = (
       let closestToTipBlock: SyncBlock | undefined;
 
       const syncBlockData = async (blockNumber: number) => {
+        try {
+          return await syncBlockDataInner(blockNumber);
+        } catch (error) {
+          // A null round (Filecoin) has no block to sync. A height with logs
+          // can't be one, whatever the RPC answers.
+          if (!perBlockLogs.has(blockNumber) && isNullRoundError(error)) return;
+          throw error;
+        }
+      };
+
+      const syncBlockDataInner = async (blockNumber: number) => {
         let block: SyncBlock | undefined;
 
         const requiredTransactions = new Set<Hash>();

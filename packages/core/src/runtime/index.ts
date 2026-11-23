@@ -1,4 +1,4 @@
-import { type Address, hexToNumber, numberToHex, toHex } from "viem";
+import { type Address, hexToNumber, numberToHex, toHex, zeroHash } from "viem";
 import type { Common } from "@/internal/common.js";
 import type {
   Chain,
@@ -9,7 +9,11 @@ import type {
   LightBlock,
   SyncBlock,
 } from "@/internal/types.js";
-import { eth_getBlockByNumber } from "@/rpc/actions.js";
+import {
+  eth_getBlockAtOrBelow,
+  eth_getBlockByNumber,
+  isNullRoundError,
+} from "@/rpc/actions.js";
 import type { Rpc } from "@/rpc/index.js";
 import {
   getFilterFactories,
@@ -29,6 +33,7 @@ import {
   encodeCheckpoint,
   MAX_CHECKPOINT,
 } from "@/utils/checkpoint.js";
+import { isFilecoinChain } from "@/utils/finality.js";
 import {
   type Interval,
   intervalBounds,
@@ -130,18 +135,39 @@ export async function getLocalSyncProgress(params: {
     cachedIntervals: params.cachedIntervals,
   });
 
+  // On Filecoin, a start block beyond a Lotus gateway's lookback, or a null
+  // round, gets a placeholder. Resumption needs only its number, and epochs are
+  // exactly 30 seconds, so its timestamp follows from the finalized block.
+  const fetchStartBlock = () =>
+    eth_getBlockByNumber(params.rpc, [numberToHex(start), false], {
+      retryNullBlockRequest: true,
+    }).catch((error) => {
+      if (
+        isFilecoinChain(params.chain.id) &&
+        (isNullRoundError(error) ||
+          (error instanceof Error &&
+            (error.message.includes("lookback") ||
+              error.message.includes("not found"))))
+      ) {
+        return {
+          hash: zeroHash,
+          parentHash: zeroHash,
+          number: numberToHex(start),
+          timestamp: numberToHex(
+            hexToNumber(params.finalizedBlock.timestamp) -
+              30 * (hexToNumber(params.finalizedBlock.number) - start),
+          ),
+        } satisfies LightBlock;
+      }
+      throw error;
+    });
+
   const diagnostics = await Promise.all(
     cached === undefined
-      ? [
-          eth_getBlockByNumber(params.rpc, [numberToHex(start), false], {
-            retryNullBlockRequest: true,
-          }),
-        ]
+      ? [fetchStartBlock()]
       : [
-          eth_getBlockByNumber(params.rpc, [numberToHex(start), false], {
-            retryNullBlockRequest: true,
-          }),
-          eth_getBlockByNumber(params.rpc, [numberToHex(cached), false], {
+          fetchStartBlock(),
+          eth_getBlockAtOrBelow(params.rpc, cached, {
             retryNullBlockRequest: true,
           }),
         ],
@@ -168,11 +194,9 @@ export async function getLocalSyncProgress(params: {
       timestamp: toHex(MAX_CHECKPOINT.blockTimestamp),
     } satisfies LightBlock;
   } else {
-    syncProgress.end = await eth_getBlockByNumber(
-      params.rpc,
-      [numberToHex(end), false],
-      { retryNullBlockRequest: true },
-    );
+    syncProgress.end = await eth_getBlockAtOrBelow(params.rpc, end, {
+      retryNullBlockRequest: true,
+    });
   }
 
   return syncProgress;

@@ -43,7 +43,12 @@ import {
 import { buildTopics, toSafeName } from "@/utils/abi.js";
 import { hyperliquidEvm, chains as viemChains } from "@/utils/chains.js";
 import { dedupe } from "@/utils/dedupe.js";
-import { DEFAULT_REORG_WINDOW, getFinalizedBlock } from "@/utils/finality.js";
+import {
+  DEFAULT_REORG_WINDOW,
+  FILECOIN_REORG_WINDOW,
+  getFinalizedBlock,
+  isFilecoinChain,
+} from "@/utils/finality.js";
 import { toLowerCase } from "@/utils/lowercase.js";
 import { buildLogFactory } from "./factory.js";
 
@@ -1077,7 +1082,11 @@ export function buildConfig({
         rpc: chain.rpc,
         ws: chain.ws,
         pollingInterval: chain.pollingInterval ?? 1_000,
-        reorgWindow: chain.reorgWindow ?? DEFAULT_REORG_WINDOW,
+        reorgWindow:
+          chain.reorgWindow ??
+          (isFilecoinChain(chain.id)
+            ? FILECOIN_REORG_WINDOW
+            : DEFAULT_REORG_WINDOW),
         cacheRpcRequests: chain.cacheRpcRequests ?? true,
         ethGetLogsBlockRange: chain.ethGetLogsBlockRange,
         viemChain: matchedChain,

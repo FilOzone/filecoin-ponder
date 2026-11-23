@@ -21,6 +21,7 @@ import {
   eth_getBlockByNumber,
   eth_getLogsWithPagination,
   eth_getTransactionReceipts,
+  isNullRoundError,
   validateLogsAndBlock,
   validateReceiptsAndBlock,
   validateTracesAndBlock,
@@ -749,7 +750,7 @@ export function createInMemoryHistoricalSync(params: {
        * Blocks that are fetched, but not yet yielded, in order. At most
        * `MAX_BLOCKS_IN_MEM` blocks are fetched ahead of the consumer.
        */
-      const pendingBlockData: Promise<BlockData>[] = [];
+      const pendingBlockData: Promise<BlockData | undefined>[] = [];
 
       for await (const interval of mergeGeneratorIntervals(
         intervalGenerators,
@@ -761,20 +762,28 @@ export function createInMemoryHistoricalSync(params: {
         ) {
           if (isBlockRequired(blockNumber) === false) continue;
 
-          const promise = syncBlock(blockNumber);
+          // A null round (Filecoin) has no block to sync. A height with logs
+          // can't be one, whatever the RPC answers.
+          const hasLogs = perBlockLogs.has(blockNumber);
+          const promise = syncBlock(blockNumber).catch((error) => {
+            if (!hasLogs && isNullRoundError(error)) return undefined;
+            throw error;
+          });
           // Note: Prevent unhandled rejections for blocks that are not awaited yet or never
           // awaited (generator returned early). Errors are still thrown when awaited below.
           promise.catch(() => {});
           pendingBlockData.push(promise);
 
           if (pendingBlockData.length >= MAX_BLOCKS_IN_MEM) {
-            yield await pendingBlockData.shift()!;
+            const blockData = await pendingBlockData.shift()!;
+            if (blockData !== undefined) yield blockData;
           }
         }
       }
 
       while (pendingBlockData.length > 0) {
-        yield await pendingBlockData.shift()!;
+        const blockData = await pendingBlockData.shift()!;
+        if (blockData !== undefined) yield blockData;
       }
 
       // Note: Fetch all child addresses, even those after the last required block.
